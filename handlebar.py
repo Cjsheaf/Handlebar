@@ -7,7 +7,8 @@ from datetime import datetime
 # noinspection PyUnresolvedReferences
 from PyQt5.QtWidgets import QApplication
 from Interface import MainWindow
-from MediaFactory import DVDHandler, HandbrakeHandler, MediaFactory
+from media_factory import DVDHandler, MediaFactory
+from handbrake import HandbrakeHandler
 
 
 class EncodeDatabase:

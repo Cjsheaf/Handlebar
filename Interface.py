@@ -1,5 +1,6 @@
 import re
 import os.path
+import datetime
 
 # noinspection PyUnresolvedReferences
 from PyQt5.QtCore import (Qt)
@@ -225,9 +226,9 @@ class EntryFrame(QFrame):
         top_buttons = QHBoxLayout()
 
         top_buttons.addWidget(self.diskButton)
-        self.diskButton.clicked.connect(self.selectMovieDrive)
+        self.diskButton.clicked.connect(self.selectMediaDrive)
         top_buttons.addWidget(self.fileButton)
-        self.fileButton.clicked.connect(self.selectMovieFile)
+        self.fileButton.clicked.connect(self.selectMediaFile)
         left_col.addLayout(top_buttons)
 
         left_col.addWidget(self.seriesCheckbox)
@@ -248,15 +249,22 @@ class EntryFrame(QFrame):
         if checkbox_state == 0:  # Unchecked
             self.seriesEntry.hide()
             self.movieEntry.show()
+            if self.media:
+                self.media.media_type = 'movie'
         else:  # Checked
             self.movieEntry.hide()
             self.seriesEntry.show()
+            if self.media:
+                self.media.media_type = 'series'
 
-    def selectMovieFile(self):
-        self.selected_movie = QFileDialog.getOpenFileName(filter="*.iso")[0]
+    def selectMediaFile(self):
+        media_filepath = QFileDialog.getOpenFileName(filter="*.iso")[0]
+        print(media_filepath)
+        self.media = MainWindow.handlebar.media_factory.read_media_from_file(media_filepath)
+        if self.media:
+            self.populateData()
 
-    def selectMovieDrive(self):
-        MainWindow.handlebar.dvd_handler.scan_drives()
+    def selectMediaDrive(self):
         media_drives = MainWindow.handlebar.media_factory.read_media_from_drives()
         selector = DriveSelectorDialog(media_drives, self)
         if selector.exec() == QDialog.Accepted:
@@ -272,26 +280,13 @@ class EntryFrame(QFrame):
         self.seriesEntry.file_label.setText(os.path.join(self.media.image_path, self.media.file_name))
         self.seriesEntry.movieNameTextBox.setText(self.media.media_name)
 
-        titles = self.media.titles
         title_strings = []
-        for titleNumber in titles.keys():
+        for title_number, title in self.media.titles.items():
             title_strings.append('Title {number} - {duration}'.format(
-                number=titleNumber, duration=titles[titleNumber]['duration']
+                number=title_number, duration=str(datetime.timedelta(seconds=title.duration))
             ))
         self.movieEntry.set_title_strings(title_strings)
         self.seriesEntry.setTitleStrings(title_strings)
-
-    @staticmethod
-    def toTitleCase(name, articles=('a', 'an', 'of', 'the', 'is')):
-        """Found in the StackOverflow answer here: http://stackoverflow.com/a/3729957/1741965"""
-        word_list = re.split(' ', name)
-        final = [word_list[0].capitalize()]
-        for word in word_list[1:]:
-            final.append(word in articles and word or word.capitalize())
-        return " ".join(final)
-
-    def formatMovieName(self, disk_name):
-        return self.toTitleCase(disk_name.replace('_', ' '))
 
     def submitEntry(self):
         if self.mode == 'Movie':
@@ -402,11 +397,11 @@ class Interface(QWidget):
         file_button_layout = QHBoxLayout()
 
         disk_button = QPushButton('Load From Disk')
-        disk_button.clicked.connect(self.entryWidget.selectMovieDrive)
+        disk_button.clicked.connect(self.entryWidget.selectMediaDrive)
         file_button_layout.addWidget(disk_button)
 
         file_button = QPushButton('Load From File')
-        file_button.clicked.connect(self.entryWidget.selectMovieFile)
+        file_button.clicked.connect(self.entryWidget.selectMediaFile)
         file_button_layout.addWidget(file_button)
 
         queue_button = QPushButton('Add To Queue')
