@@ -3,64 +3,7 @@ import re
 import subprocess
 import threading
 
-
-class SubtitleTrack:
-    def __init__(self, track_number, language):
-        self.track_number = track_number
-        self.language = language
-
-    def __lt__(self, other):
-        if other:
-            return self.track_number < other.track_number
-        else:
-            return False
-
-
-class AudioTrack:
-    def __init__(self, track_number, language, encoding, channels, hertz, bitrate):
-        self.track_number = track_number
-        self.language = language
-        self.encoding = encoding
-        self.channels = channels
-        self.hertz = hertz
-        self.bitrate = bitrate
-
-    def __lt__(self, other):
-        if other:
-            return self.track_number < other.track_number
-        else:
-            return False
-
-
-class TrackList(list):
-    """A list-like container that starts at index 1 instead of index 0"""
-    def __init__(self, iterable):
-        self._data = list(iterable)
-
-    def __len__(self):
-        return len(self._data)
-
-    def __iter__(self):
-        return iter(self._data)
-
-    def __getitem__(self, index):
-        return self._data[index - 1]
-
-    def __setitem__(self, index, value):
-        self._data[index - 1] = value
-
-
-class Title:
-    """Every movie or series is comprised of at least one title, which in turn usually contains multiple video
-    and audio tracks. Not to be confused with the NAME of the movie or series."""
-    def __init__(self, duration, resolution, framerate, subtitle_tracks=None, audio_tracks=None):
-        self.duration = duration  # In seconds
-        self.resolution = resolution
-        self.framerate = framerate
-
-        # Track numbers use 1-based indexes, so the TrackList objects act like a list that starts at index 1.
-        self.subtitle_tracks = TrackList(subtitle_tracks)
-        self.audio_tracks = TrackList(audio_tracks)
+from media_factory import SubtitleTrack, AudioTrack, Title
 
 
 class TitleScan:
@@ -210,6 +153,10 @@ class TitleScan:
         return Title(duration, resolution, framerate, subtitle_tracks, audio_tracks)
 
 
+class EncodeJob:
+    def __init__(self, handbrake_settings):
+        self.handbrake_settings = handbrake_settings
+
 class HandbrakeHandler:
     def __init__(self, handbrake_path, encode_queue, plex_path, dvd_handler, settings_file=None):
         self.handbrake_path = handbrake_path
@@ -260,9 +207,8 @@ class HandbrakeHandler:
             yield x
 
     # Defaults to encoding with all audio tracks and all subtitle tracks included.
-    def encode_media(self, out_path, title_number):
-        title_info = self.get_title_info()
-        selected_title = title_info[title_number]
+    def encode_media(self, media, out_path, title_number):
+        selected_title = media.titles[title_number]
 
         # Get a list of track numbers for both the audio and subtitle tracks:
         audio_tracks = [str(track.track_number) for track in selected_title.audio_tracks]
@@ -304,9 +250,9 @@ class HandbrakeHandler:
         ).start()
 
     @staticmethod
-    def _enqueue(media_path, out_path, cmd_string, dvd_handler, encode_queue):
+    def _enqueue(media_name, media_path, out_path, cmd_string, dvd_handler, encode_queue):
         temp_file = os.path.abspath(os.path.join('.\\', os.path.split(out_path)[1] + '.iso'))
         dvd_handler.save_to_file(media_path, temp_file)
-        encode_queue.enqueue(temp_file, cmd_string)
+        encode_queue.enqueue(media_name, temp_file, cmd_string)
 
 

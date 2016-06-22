@@ -1,15 +1,18 @@
 import re
 import os.path
 import datetime
+from queue import Queue
 
 # noinspection PyUnresolvedReferences
-from PyQt5.QtCore import (Qt)
+from PyQt5.QtCore import (Qt, QTimer)
 # noinspection PyUnresolvedReferences
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QPushButton, QFileDialog, QMenuBar, QMenu, QVBoxLayout,
                              QHBoxLayout, QFrame, QLabel, QLineEdit, QToolButton, QCheckBox, QComboBox,
-                             QSpacerItem, QMessageBox, QDialog, QDialogButtonBox, QTreeView)
+                             QSpacerItem, QMessageBox, QDialog, QDialogButtonBox, QTreeView, QProgressBar,
+                             QListWidget, QListWidgetItem)
 # noinspection PyUnresolvedReferences
 from PyQt5.QtGui import (QIntValidator, QStandardItemModel)
+from database import EncodeStatus
 
 
 class MovieEntry(QWidget):
@@ -352,34 +355,90 @@ class DriveSelectorDialog(QDialog):
         return self.selectedDrive
 
 
-class QueueDisplay(QFrame):
-    def __init__(self):
-        super(QueueDisplay, self).__init__()
+class EncodeDisplay(QFrame):
+    """Displays the encode status next to a progress bar (if the encode has started)"""
+    def __init__(self, media_name, encode_status):
+        super(EncodeDisplay, self).__init__()
+        if not isinstance(encode_status, EncodeStatus):
+            raise RuntimeError('Argument encode_status must be a value from Enum class database.EncodeStatus!')
 
-        self.listModel = QStandardItemModel(0, 2)
-        self.listView = QTreeView()
+        self.media_name = media_name
+
+        # These values will be periodically updated by a worker thread and polled in a thread-safe manner by the GUI.
+        self.encode_status = encode_status
+        self.percent_complete = 0
+
+        self.main_layout = QHBoxLayout()
+        self.setLayout(self.main_layout)
+
+        self.name_label = QLabel(self.media_name)
+        self.status_label = QLabel(self.encode_status.name)
+        self.progress_bar = QProgressBar()
 
         self.doLayout()
+        self.update()
 
     def doLayout(self):
-        main_layout = QVBoxLayout()
+        # The progress bar will show whole percentages:
+        self.progress_bar.minimum = 0
+        self.progress_bar.maximum = 100
+        self.progress_bar.hide()  # Do not show the progress bar unless an encode is in progress.
 
-        # noinspection PyPep8Naming
-        MEDIA_NAME, STATUS = range(2)
-        self.listModel.setHeaderData(MEDIA_NAME, Qt.Horizontal, 'Media Name')
-        self.listModel.setHeaderData(STATUS, Qt.Horizontal, 'Status')
+        self.main_layout.addWidget(self.name_label)
+        self.main_layout.addWidget(self.status_label)
+        self.main_layout.addWidget(self.progress_bar)
 
-        self.listView.setModel(self.listModel)
+    def update(self):
+        self.progress_bar.setValue(self.percent_complete)
 
-        main_layout.addWidget(self.listView)
-        self.setLayout(main_layout)
+        if self.encode_status is EncodeStatus.In_Progress:
+            self.status_label.hide()
+            self.progress_bar.show()
+        else:
+            self.status_label.show()
+            self.progress_bar.hide()
 
-    def getRow(self, media_name):
-        pass
+class DisplayList(QFrame):
+    def __init__(self):
+        super(DisplayList, self).__init__()
 
-    def updateStatus(self, media_name, status):
-        pass
+        self.main_layout = QVBoxLayout()
+        self.setLayout(self.main_layout)
+        self.displays = QListWidget()
+        self.display_mapping = {}  # Used to retrieve a display given the media_name it was created with.
+        self.main_layout.addWidget(self.displays)
 
+        # New EncodeDisplay instances will be created by worker threads and added to this queue. The instances cannot
+        # be directly added to self.displays by any thread other than the QT thread. When self._refreshDisplays()
+        # is periodically called by the QT thread, it will add any instances waiting in this queue.
+        self.new_displays = Queue()
+
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self._refreshDisplays)
+        self.update_timer.start(200)
+
+    def getDisplay(self, media_name):
+        return self.display_mapping[media_name]
+
+    def _addDisplay(self, display):
+        list_item = QListWidgetItem()
+        list_item.setSizeHint(display.sizeHint())
+        self.displays.addItem(list_item)
+        self.displays.setItemWidget(list_item, display)
+        self.display_mapping[display.media_name] = display
+
+    def _refreshDisplays(self):
+        try:
+            while not self.new_displays.empty():
+                display = self.new_displays.get_nowait()
+                self._addDisplay(display)
+                self.new_displays.task_done()
+        except Queue.Empty:
+            pass  # There is only one consumer thread, so it should not get here. Even then, the loop should end anyway.
+
+        for index in range(self.displays.count()):
+            display = self.displays.itemWidget(self.displays.item(index))
+            display.update()
 
 class Interface(QWidget):
     def __init__(self):
@@ -388,7 +447,7 @@ class Interface(QWidget):
         self.setLayout(self.mainLayout)
 
         self.entryWidget = EntryFrame()
-        self.mediaQueue = QueueDisplay()
+        self.mediaQueue = DisplayList()
 
         self.doLayout()
 

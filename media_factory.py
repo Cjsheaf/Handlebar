@@ -208,3 +208,60 @@ class ProgressWrapper:
             self.callback(self.percent)
 
 
+class SubtitleTrack:
+    def __init__(self, track_number, language):
+        self.track_number = track_number
+        self.language = language
+
+    def __lt__(self, other):
+        if other:
+            return self.track_number < other.track_number
+        else:
+            return False
+
+
+class AudioTrack:
+    def __init__(self, track_number, language, encoding, channels, hertz, bitrate):
+        self.track_number = track_number
+        self.language = language
+        self.encoding = encoding
+        self.channels = channels
+        self.hertz = hertz
+        self.bitrate = bitrate
+
+    def __lt__(self, other):
+        if other:
+            return self.track_number < other.track_number
+        else:
+            return False
+
+
+class TrackList(list):
+    """A list-like container that starts at index 1 instead of index 0"""
+    def __init__(self, iterable):
+        self._data = list(iterable)
+
+    def __len__(self):
+        return len(self._data)
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __getitem__(self, index):
+        return self._data[index - 1]
+
+    def __setitem__(self, index, value):
+        self._data[index - 1] = value
+
+
+class Title:
+    """Every movie or series is comprised of at least one title, which in turn usually contains multiple video
+    and audio tracks. Not to be confused with the NAME of the movie or series."""
+    def __init__(self, duration, resolution, framerate, subtitle_tracks=None, audio_tracks=None):
+        self.duration = duration  # In seconds
+        self.resolution = resolution
+        self.framerate = framerate
+
+        # Track numbers use 1-based indexes, so the TrackList objects act like a list that starts at index 1.
+        self.subtitle_tracks = TrackList(subtitle_tracks)
+        self.audio_tracks = TrackList(audio_tracks)
