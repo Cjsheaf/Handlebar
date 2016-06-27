@@ -232,7 +232,7 @@ class HandbrakeHandler:
 
         cmd = [
             self.handbrake_path,
-            '-i', '"' + self.media_path + '"',
+            '-i', '"' + media.get_source_path() + '"',
             '-o', '"' + out_path + '"',
             '--title', str(title_number)
         ]
@@ -246,11 +246,12 @@ class HandbrakeHandler:
 
         threading.Thread(
             target=self._enqueue,
-            args=(self.media_path, out_path, cmd_string, self.dvd_handler, self.encode_queue)
+            args=(media.file_name, media.get_source_path(), out_path, cmd_string, self.dvd_handler, self.encode_queue)
         ).start()
 
     @staticmethod
     def _enqueue(media_name, media_path, out_path, cmd_string, dvd_handler, encode_queue):
+        # TODO: Use a settings object to determine the temporary directory path.
         temp_file = os.path.abspath(os.path.join('.\\', os.path.split(out_path)[1] + '.iso'))
         dvd_handler.save_to_file(media_path, temp_file)
         encode_queue.enqueue(media_name, temp_file, cmd_string)

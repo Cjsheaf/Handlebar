@@ -1,7 +1,7 @@
 import re
 import os.path
 import datetime
-from queue import Queue
+import queue
 
 # noinspection PyUnresolvedReferences
 from PyQt5.QtCore import (Qt, QTimer)
@@ -262,17 +262,16 @@ class EntryFrame(QFrame):
 
     def selectMediaFile(self):
         media_filepath = QFileDialog.getOpenFileName(filter="*.iso")[0]
-        print(media_filepath)
-        self.media = MainWindow.handlebar.media_factory.read_media_from_file(media_filepath)
-        if self.media:
-            self.populateData()
+        if media_filepath:
+            self.media = MainWindow.handlebar.media_factory.read_media_from_file(media_filepath)
+            if self.media:
+                self.populateData()
 
     def selectMediaDrive(self):
         media_drives = MainWindow.handlebar.media_factory.read_media_from_drives()
         selector = DriveSelectorDialog(media_drives, self)
         if selector.exec() == QDialog.Accepted:
             self.media = selector.getSelectedDrive()
-            print(self.media)
             self.populateData()
         else:
             self.media = None
@@ -294,18 +293,18 @@ class EntryFrame(QFrame):
     def submitEntry(self):
         if self.mode == 'Movie':
             # TODO: Sanity check all the fields for valid data. Preferably using QT methods.
-            name = self.movieEntry.movie_name_text_box.text()
-            year = self.movieEntry.year_text_box.text()
-
             match = re.search(r'^Title (\d+)', self.movieEntry.title_dropdown.currentText())
             title_number = int(match.group(1))
 
-            filename = '{name} ({year}).mkv'.format(name=name, year=year)
-            media_dir = MainWindow.handlebar.handbrakeHandler.plex_path
-            filepath = os.path.join(media_dir, 'Movies\\', filename)
+            output_filename = '{name} ({year}).mkv'.format(
+                name=self.movieEntry.movie_name_text_box.text(), year=self.movieEntry.year_text_box.text()
+            )
+            # TODO: Use a settings object to find the output path.
+            media_dir = MainWindow.handlebar.handbrake_handler.plex_path
+            filepath = os.path.join(media_dir, 'Movies\\', output_filename)
             print(filepath)
 
-            MainWindow.handlebar.handbrakeHandler.encode_media(filepath, title_number)
+            MainWindow.handlebar.handbrake_handler.encode_media(self.media, filepath, title_number)
         elif self.mode == 'Series':
             pass
 
@@ -411,14 +410,17 @@ class DisplayList(QFrame):
         # New EncodeDisplay instances will be created by worker threads and added to this queue. The instances cannot
         # be directly added to self.displays by any thread other than the QT thread. When self._refreshDisplays()
         # is periodically called by the QT thread, it will add any instances waiting in this queue.
-        self.new_displays = Queue()
+        self.new_displays = queue.Queue()
 
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self._refreshDisplays)
         self.update_timer.start(200)
 
     def getDisplay(self, media_name):
-        return self.display_mapping[media_name]
+        if media_name in self.display_mapping.keys():
+            return self.display_mapping[media_name]
+        else:
+            return None
 
     def _addDisplay(self, display):
         list_item = QListWidgetItem()
@@ -430,15 +432,16 @@ class DisplayList(QFrame):
     def _refreshDisplays(self):
         try:
             while not self.new_displays.empty():
-                display = self.new_displays.get_nowait()
-                self._addDisplay(display)
+                args = self.new_displays.get_nowait()
+                self._addDisplay(EncodeDisplay(args))
                 self.new_displays.task_done()
-        except Queue.Empty:
+        except queue.Empty:
             pass  # There is only one consumer thread, so it should not get here. Even then, the loop should end anyway.
 
         for index in range(self.displays.count()):
             display = self.displays.itemWidget(self.displays.item(index))
             display.update()
+
 
 class Interface(QWidget):
     def __init__(self):
@@ -447,7 +450,7 @@ class Interface(QWidget):
         self.setLayout(self.mainLayout)
 
         self.entryWidget = EntryFrame()
-        self.mediaQueue = DisplayList()
+        self.queueDisplay = DisplayList()
 
         self.doLayout()
 
@@ -471,7 +474,7 @@ class Interface(QWidget):
         entry_layout.addLayout(file_button_layout)
         self.mainLayout.addLayout(entry_layout)
 
-        self.mainLayout.addWidget(self.mediaQueue)
+        self.mainLayout.addWidget(self.queueDisplay)
 
     def addToQueue(self):
         self.entryWidget.submitEntry()
