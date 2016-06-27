@@ -9,5 +9,5 @@ Currently, this application only works on Windows with Python 3.4 or higher and 
 Linux support will be added shortly after the initial release.
 
 The following Python packages are also required:
-    - PyQT5
-    - wmi (Windows Management Instrumentation)
+  - PyQT5
+  - wmi (Windows Management Instrumentation)
