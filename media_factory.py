@@ -1,5 +1,6 @@
 import os.path
 import re
+import sqlite3
 
 import wmi
 from dvdvideo.utils import ProgressStream
@@ -33,8 +34,11 @@ class Media:
         """titles stores a semi-formatted nested dictionary tree of information. The information is parsed from a
         Handbrake scan log, which is performed lazily because it is an expensive operation. Title numbers in the
         range [1-99] are used as the dictionary keys."""
-        self.handbrake_handler.load_media(self.get_source_path())
-        return self.handbrake_handler.get_title_info()
+        from handbrake import TitleScan
+        if self.source_type == 'drive':
+            return TitleScan(self.handbrake_path, self.image_path).titles
+        else:
+            return TitleScan(self.handbrake_path, self.get_source_path()).titles
 
     @property
     def source_type(self):
@@ -42,7 +46,7 @@ class Media:
 
     @source_type.setter
     def source_type(self, value):
-        if value is 'file' or value is 'drive':
+        if value == 'file' or value == 'drive':
             self._source_type = value
         else:
             raise ValueError(
@@ -55,16 +59,16 @@ class Media:
 
     @media_type.setter
     def media_type(self, value):
-        if value is 'movie' or value is 'series':
+        if value == 'movie' or value == 'series':
             self._media_type = value
         else:
             raise ValueError(
                 'Argument media_type can only be "movie" or "series"! "{}" was given.'.format(value)
             )
 
-    def __init__(self, image_filepath, handbrake_handler, source_type='file', media_type='movie', volume_name=None):
+    def __init__(self, image_filepath, handbrake_path, source_type='file', media_type='movie', volume_name=None):
         """image_filepath may also be a drive letter, such as 'G:'"""
-        self.handbrake_handler = handbrake_handler
+        self.handbrake_path = handbrake_path
         self.source_type = source_type
         self.media_type = media_type
 
@@ -82,7 +86,8 @@ class Media:
         # Handle this case by ensuring any drive letter (if present) has at least one backslash:
         drive_letter, tail = os.path.splitdrive(image_filepath)
         if drive_letter:
-            image_filepath = os.path.abspath(os.path.join(drive_letter, '\\', tail.lstrip('\\')))
+            drive_letter = os.path.join(drive_letter, '\\')
+            image_filepath = os.path.abspath(os.path.join(drive_letter, tail.lstrip('\\')))
 
         # If a volume_name has been provided, this media image must be from a drive rather than a file.
         # In that case, there is no file name, so we use the volume_name instead. The "directory" is simply the drive.
@@ -108,7 +113,7 @@ class Media:
         return " ".join(final)
 
     def get_source_path(self):
-        if self.source_type is 'drive':
+        if self.source_type == 'drive':
             return self.image_path  # Media in a drive has no file name. Return only the drive letter.
         else:
             return os.path.join(self.image_path, self.file_name)
@@ -132,18 +137,20 @@ class PLEXFormatter:
 
 
 class MediaFactory:
-    def __init__(self, dvd_handler, handbrake_handler):
+    def __init__(self, dvd_handler, handbrake_path):
         self.dvd_handler = dvd_handler
-        self.handbrake_handler = handbrake_handler
+        self.handbrake_path = handbrake_path
 
+    # TODO: Make this a static method that does not rely on a MediaFactory instance to hold state.
     def read_media_from_drives(self):
         """Scans all system drives for media and returns a list of Media objects created from the loaded drives."""
         self.dvd_handler.scan_drives()
-        return [Media(drive.Drive, self.handbrake_handler, source_type='drive', volume_name=drive.VolumeName)
+        return [Media(drive.Drive, self.handbrake_path, source_type='drive', volume_name=drive.VolumeName)
                 for drive in self.dvd_handler.get_media_drives()]
 
-    def read_media_from_file(self, filepath):
-        return Media(filepath, self.handbrake_handler, source_type='file')
+    @staticmethod
+    def read_media_from_file(filepath, program_settings):
+        return Media(filepath, program_settings['handbrake']['handbrake_path'], source_type='file')
 
 
 class DVDHandler:
@@ -161,16 +168,17 @@ class DVDHandler:
         return d.MediaLoaded
 
     @staticmethod
-    def save_to_file(drive, filepath, queue_display=None):
+    def save_to_file(media, output_filepath, progress_callback=None):
         # The save function writes a progress bar to a text stream. We want to parse that text in real time in order
         # to determine what percentage is complete. The ProgressWrapper class does exactly this by acting like a stream.
-        stream = ProgressWrapper()
+        stream = ProgressWrapper(progress_callback)
 
-        if queue_display:
-            pass
-
-        drive = drive.rstrip('\\')
-        dvdvideo_backup_image.main(ProgressStream(stream), r'\\.\{}'.format(drive), filepath)
+        print('Saving to file: "{}"'.format(output_filepath))
+        if media.source_type == 'drive':
+            drive = media.image_path.rstrip('\\')
+            dvdvideo_backup_image.main(ProgressStream(stream), r'\\.\{}'.format(drive), output_filepath)
+        else:
+            raise RuntimeError('Media source is not from a drive and does not need to be saved to a file!')
 
     def scan_drives(self):
         for cdrom in self.win.Win32_CDROMDrive():
@@ -192,11 +200,10 @@ class DVDHandler:
 
 
 class ProgressWrapper:
-    def __init__(self, callback=None, media_name=None):
+    def __init__(self, callback=None):
         self.percent = 0  # Integer value between 0 and 100 (inclusive)
         self.text = ''
         self.callback = callback
-        self.mediaName = media_name
 
     def write(self, text):
         self.text += text
@@ -204,7 +211,7 @@ class ProgressWrapper:
     def flush(self):
         self.percent = int(re.search(r' (\d{1,3})%$', self.text).group(1))
         self.text = ''
-        if self.callback is not None:
+        if self.callback:
             self.callback(self.percent)
 
 

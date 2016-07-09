@@ -158,9 +158,9 @@ class EncodeJob:
         self.handbrake_settings = handbrake_settings
 
 class HandbrakeHandler:
-    def __init__(self, handbrake_path, encode_queue, plex_path, dvd_handler, settings_file=None):
+    def __init__(self, handbrake_path, work_queue, plex_path, dvd_handler, settings_file=None):
         self.handbrake_path = handbrake_path
-        self.encode_queue = encode_queue
+        self.work_queue = work_queue
         self.plex_path = plex_path
         self.dvd_handler = dvd_handler
         self.media_path = None
@@ -172,12 +172,9 @@ class HandbrakeHandler:
     @staticmethod
     def get_default_handbrake_args():
         args = [
-            '-f', 'mkv',
             '--loose-anamorphic',
             '--modulus', '2',
-            '-e', 'x264',
-            '-q', '26',  # Set a slightly higher than average quality
-            '--vfr'  # Use variable frame rate
+            '--vfr'  # Variable frame rate
         ]
         return args
 
@@ -206,8 +203,8 @@ class HandbrakeHandler:
             yield delimiter
             yield x
 
-    # Defaults to encoding with all audio tracks and all subtitle tracks included.
-    def encode_media(self, media, out_path, title_number):
+    @staticmethod
+    def build_handbrake_cmd(program_settings, media, out_path, title_number):
         selected_title = media.titles[title_number]
 
         # Get a list of track numbers for both the audio and subtitle tracks:
@@ -215,45 +212,34 @@ class HandbrakeHandler:
         subtitle_tracks = [str(track.track_number) for track in selected_title.subtitle_tracks]
 
         # String-ify the audio track numbers with commas, E.G: '1,2,3,...,n' which is how Handbrake expects them:
-        audio_args = ['-a', ''.join(self.intersperse(audio_tracks, ','))]
+        audio_args = ['-a', ''.join(HandbrakeHandler.intersperse(audio_tracks, ','))]
         # For each audio track, there needs to be a corresponding encoder entry:
         # Should result in a string of the form: 'av_aac,av_aac,av_aac,av_aac,...' with the same length as audio_tracks.
-        audio_args += ['-E', ''.join(self.intersperse(['av_aac'] * len(audio_tracks), ','))]
+        audio_args += ['-E', ''.join(HandbrakeHandler.intersperse(['av_aac'] * len(audio_tracks), ','))]
         # Do the same for the mixdown option, keeping it at 5.1 surround sound (6 channel) at 384 KB/s:
-        audio_args += ['--mixdown', ''.join(self.intersperse(['6ch'] * len(audio_tracks), ','))]
-        audio_args += ['-B', ''.join(self.intersperse(['384'] * len(audio_tracks), ','))]
+        audio_args += ['--mixdown', ''.join(HandbrakeHandler.intersperse(['6ch'] * len(audio_tracks), ','))]
+        audio_args += ['-B', ''.join(HandbrakeHandler.intersperse(['384'] * len(audio_tracks), ','))]
         audio_args += ['--audio-fallback', 'ac3']
 
         # String-ify the subtitle track numbers, with an additional 'scan' track at the beginning:
-        if subtitle_tracks:  # There may not be any subtitle tracks.
-            subtitle_args = ['--subtitle', ''.join(self.intersperse(['scan'] + subtitle_tracks, ','))]
+        if subtitle_tracks:  # There might not be any subtitle tracks.
+            subtitle_args = ['--subtitle', ''.join(HandbrakeHandler.intersperse(['scan'] + subtitle_tracks, ','))]
         else:
             subtitle_args = []
 
         cmd = [
-            self.handbrake_path,
+            program_settings['handbrake']['handbrake_path'],
             '-i', '"' + media.get_source_path() + '"',
             '-o', '"' + out_path + '"',
             '--title', str(title_number)
         ]
-        cmd += self.handbrake_args
+        cmd += HandbrakeHandler.get_default_handbrake_args()
+        cmd += ['-f', program_settings['handbrake']['output_format']]
+        cmd += ['-q', program_settings['handbrake']['quality']]
+        cmd += ['-e', program_settings['handbrake']['encoder']]
         cmd += audio_args
         cmd += subtitle_args
         print('ENCODE ARGS:')
         print(repr(cmd))
-        cmd_string = ''.join(self.intersperse(cmd, ' '))
-        print(cmd_string)
-
-        threading.Thread(
-            target=self._enqueue,
-            args=(media.file_name, media.get_source_path(), out_path, cmd_string, self.dvd_handler, self.encode_queue)
-        ).start()
-
-    @staticmethod
-    def _enqueue(media_name, media_path, out_path, cmd_string, dvd_handler, encode_queue):
-        # TODO: Use a settings object to determine the temporary directory path.
-        temp_file = os.path.abspath(os.path.join('.\\', os.path.split(out_path)[1] + '.iso'))
-        dvd_handler.save_to_file(media_path, temp_file)
-        encode_queue.enqueue(media_name, temp_file, cmd_string)
-
-
+        cmd_string = ''.join(HandbrakeHandler.intersperse(cmd, ' '))
+        return cmd_string

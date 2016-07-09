@@ -2,17 +2,20 @@ import re
 import os.path
 import datetime
 import queue
+import threading
 
 # noinspection PyUnresolvedReferences
-from PyQt5.QtCore import (Qt, QTimer)
+from PyQt5.QtCore import (Qt, QTimer, pyqtSignal)
 # noinspection PyUnresolvedReferences
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QPushButton, QFileDialog, QMenuBar, QMenu, QVBoxLayout,
                              QHBoxLayout, QFrame, QLabel, QLineEdit, QToolButton, QCheckBox, QComboBox,
                              QSpacerItem, QMessageBox, QDialog, QDialogButtonBox, QTreeView, QProgressBar,
-                             QListWidget, QListWidgetItem)
+                             QListWidget, QListWidgetItem, QApplication, QAction)
 # noinspection PyUnresolvedReferences
 from PyQt5.QtGui import (QIntValidator, QStandardItemModel)
 from database import EncodeStatus
+from settings import SettingsDialog
+from media_factory import MediaFactory
 
 
 class MovieEntry(QWidget):
@@ -206,6 +209,8 @@ class SeriesEntry(QWidget):
 
 
 class EntryFrame(QFrame):
+    # TODO: Use signals to directly alter the data in self.media as widgets are edited.
+    # TODO: Sanity check user input so that self.media is never in an invalid state.
     def __init__(self):
         super(EntryFrame, self).__init__()
         self.media = None
@@ -263,7 +268,7 @@ class EntryFrame(QFrame):
     def selectMediaFile(self):
         media_filepath = QFileDialog.getOpenFileName(filter="*.iso")[0]
         if media_filepath:
-            self.media = MainWindow.handlebar.media_factory.read_media_from_file(media_filepath)
+            self.media = MediaFactory.read_media_from_file(media_filepath, MainWindow.handlebar.program_settings)
             if self.media:
                 self.populateData()
 
@@ -299,12 +304,12 @@ class EntryFrame(QFrame):
             output_filename = '{name} ({year}).mkv'.format(
                 name=self.movieEntry.movie_name_text_box.text(), year=self.movieEntry.year_text_box.text()
             )
-            # TODO: Use a settings object to find the output path.
-            media_dir = MainWindow.handlebar.handbrake_handler.plex_path
+            media_dir = MainWindow.handlebar.program_settings['output']['media_directory']
             filepath = os.path.join(media_dir, 'Movies\\', output_filename)
             print(filepath)
 
-            MainWindow.handlebar.handbrake_handler.encode_media(self.media, filepath, title_number)
+            # Enqueue a rip job if the source_type is from a drive, otherwise enqueue an encode job.
+            MainWindow.handlebar.work_queue.enqueue(self.media, filepath, title_number, self.media.source_type == 'drive')
         elif self.mode == 'Series':
             pass
 
@@ -355,27 +360,24 @@ class DriveSelectorDialog(QDialog):
 
 
 class EncodeDisplay(QFrame):
-    """Displays the encode status next to a progress bar (if the encode has started)"""
+    """Displays the encode status, or displays a progress bar if the encode is in progress."""
     def __init__(self, media_name, encode_status):
         super(EncodeDisplay, self).__init__()
         if not isinstance(encode_status, EncodeStatus):
             raise RuntimeError('Argument encode_status must be a value from Enum class database.EncodeStatus!')
 
         self.media_name = media_name
-
-        # These values will be periodically updated by a worker thread and polled in a thread-safe manner by the GUI.
-        self.encode_status = encode_status
-        self.percent_complete = 0
+        self.encode_status = None
 
         self.main_layout = QHBoxLayout()
         self.setLayout(self.main_layout)
 
         self.name_label = QLabel(self.media_name)
-        self.status_label = QLabel(self.encode_status.name)
         self.progress_bar = QProgressBar()
+        self.status_label = QLabel()
 
         self.doLayout()
-        self.update()
+        self.set_status(encode_status)
 
     def doLayout(self):
         # The progress bar will show whole percentages:
@@ -384,37 +386,36 @@ class EncodeDisplay(QFrame):
         self.progress_bar.hide()  # Do not show the progress bar unless an encode is in progress.
 
         self.main_layout.addWidget(self.name_label)
-        self.main_layout.addWidget(self.status_label)
         self.main_layout.addWidget(self.progress_bar)
+        self.main_layout.addWidget(self.status_label)
 
-    def update(self):
-        self.progress_bar.setValue(self.percent_complete)
+    def set_status(self, encode_status):
+        self.encode_status = encode_status
+        self.status_label.setText(self.encode_status.name)
 
-        if self.encode_status is EncodeStatus.In_Progress:
-            self.status_label.hide()
+        # Only show a progress bar if a rip or encode is currently in progress.
+        if self.encode_status is EncodeStatus.Ripping or self.encode_status is EncodeStatus.Encoding:
             self.progress_bar.show()
         else:
-            self.status_label.show()
             self.progress_bar.hide()
 
+    def set_progress(self, percent_complete):
+        self.progress_bar.setValue(percent_complete)
+
+
 class DisplayList(QFrame):
+    init_display = pyqtSignal(str, object, object)
+
     def __init__(self):
         super(DisplayList, self).__init__()
+        self.ui_thread = threading.current_thread()
 
         self.main_layout = QVBoxLayout()
         self.setLayout(self.main_layout)
         self.displays = QListWidget()
         self.display_mapping = {}  # Used to retrieve a display given the media_name it was created with.
         self.main_layout.addWidget(self.displays)
-
-        # New EncodeDisplay instances will be created by worker threads and added to this queue. The instances cannot
-        # be directly added to self.displays by any thread other than the QT thread. When self._refreshDisplays()
-        # is periodically called by the QT thread, it will add any instances waiting in this queue.
-        self.new_displays = queue.Queue()
-
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self._refreshDisplays)
-        self.update_timer.start(200)
+        self.init_display.connect(self._initDisplay)
 
     def getDisplay(self, media_name):
         if media_name in self.display_mapping.keys():
@@ -422,25 +423,28 @@ class DisplayList(QFrame):
         else:
             return None
 
-    def _addDisplay(self, display):
+    def createDisplay(self, media_name, encode_status):
+        ready_event = threading.Event()
+        ready_event.clear()
+
+        # The display can ONLY be created on the UI thread. By using QT signals,
+        # we can have the UI thread run _initDisplay(). Use ready_event to
+        # wait until the UI thread signals that the display has been created.
+        self.init_display.emit(media_name, encode_status, ready_event)
+        if threading.current_thread() == self.ui_thread:
+            QApplication.processEvents()  # Force the event manager to process the init_display we signal just sent.
+        else:
+            ready_event.wait()
+        return self.display_mapping[media_name]
+
+    def _initDisplay(self, media_name, encode_status, ready_event):
+        display = EncodeDisplay(media_name, encode_status)
         list_item = QListWidgetItem()
         list_item.setSizeHint(display.sizeHint())
         self.displays.addItem(list_item)
         self.displays.setItemWidget(list_item, display)
-        self.display_mapping[display.media_name] = display
-
-    def _refreshDisplays(self):
-        try:
-            while not self.new_displays.empty():
-                args = self.new_displays.get_nowait()
-                self._addDisplay(EncodeDisplay(args))
-                self.new_displays.task_done()
-        except queue.Empty:
-            pass  # There is only one consumer thread, so it should not get here. Even then, the loop should end anyway.
-
-        for index in range(self.displays.count()):
-            display = self.displays.itemWidget(self.displays.item(index))
-            display.update()
+        self.display_mapping[media_name] = display
+        ready_event.set()  # Allow the consumer thread to resume.
 
 
 class Interface(QWidget):
@@ -488,11 +492,21 @@ class MainWindow(QMainWindow):
         MainWindow.handlebar = handlebar
 
         self.setWindowTitle('Handlebar')
-        menu_bar = QMenuBar()
-        file_menu = QMenu('File', self)
-        exit_action = file_menu.addAction('Exit')
-        menu_bar.addMenu(file_menu)
-        self.setMenuBar(menu_bar)
+        self.menu_bar = QMenuBar()
+        self.setMenuBar(self.menu_bar)
+        self.setupMenuBar()
 
         self.interface = Interface()
         self.setCentralWidget(self.interface)
+
+    def setupMenuBar(self):
+        file_menu = self.menu_bar.addMenu('File')
+        settings_action = QAction('Settings', self, statusTip='Open a window to access program settings.',
+                                  triggered=self.openSettingsMenu)
+        file_menu.addAction(settings_action)
+        file_menu.addSeparator()
+        exit_action = QAction('Exit', self, statusTip='Close the application.', triggered=self.close)
+        file_menu.addAction(exit_action)
+
+    def openSettingsMenu(self):
+        settings_dialog = SettingsDialog(self.handlebar.program_settings, self).exec()
