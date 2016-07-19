@@ -1,19 +1,20 @@
 import os.path
 import re
 import subprocess
-import threading
 
-from media_factory import SubtitleTrack, AudioTrack, Title
+import Handlebar.util as util
+from Handlebar.media_factory import SubtitleTrack, AudioTrack, Title
 
 
 class TitleScan:
     def __init__(self, handbrake_path, media_filepath):
+        if handbrake_path == 'not_set':
+            raise RuntimeError('The handbrake executable path has not been set!')
         self.handbrake_path = handbrake_path
         # self.titles is basically a dict used as a sparse array. Title numbers are keys with Title objects as values.
         # Titles reported by Handbrake may start at any title number and are not guaranteed to be contiguous.
         self.titles = self.scan_titles(media_filepath)
 
-    # TODO: Make this function also spit out a valid path on UNIX
     @staticmethod
     def fix_path(file_path):
         """Return a path that Handbrake accepts in all input cases.
@@ -25,7 +26,10 @@ class TitleScan:
         correctly, so we can always add two backslashes for correctness in all cases.
         """
         drive_letter, tail = os.path.splitdrive(file_path)
-        return os.path.join(drive_letter, r'\\', tail.lstrip('\\'))  # Guarantee two backslashes after the drive letter
+        if drive_letter:
+            return os.path.join(drive_letter, r'\\', tail.lstrip('\\'))  # Guarantee two backslashes after the drive letter
+        else:
+            return file_path
 
     def scan_titles(self, media_filepath):
         fixed_path = self.fix_path(media_filepath) # Handbrake has some path oddities on Windows that must be fixed.
@@ -153,55 +157,15 @@ class TitleScan:
         return Title(duration, resolution, framerate, subtitle_tracks, audio_tracks)
 
 
-class EncodeJob:
-    def __init__(self, handbrake_settings):
-        self.handbrake_settings = handbrake_settings
-
 class HandbrakeHandler:
-    def __init__(self, handbrake_path, work_queue, plex_path, dvd_handler, settings_file=None):
-        self.handbrake_path = handbrake_path
-        self.work_queue = work_queue
-        self.plex_path = plex_path
-        self.dvd_handler = dvd_handler
-        self.media_path = None
-        self.title_count = 0
-        self.titles = {}  # A dictionary that contains any number of nested sub-dictionaries. Poor-man's tree structure.
-        self.handbrake_args = self.get_default_handbrake_args()
-        self.is_media_set = False
-
     @staticmethod
-    def get_default_handbrake_args():
+    def get_default_args():
         args = [
             '--loose-anamorphic',
             '--modulus', '2',
             '--vfr'  # Variable frame rate
         ]
         return args
-
-    # TODO: Eventually break getTitleInfo() into individual methods that do not use a nested dict.
-    def get_title_info(self):
-        if not self.is_media_set:
-            raise RuntimeError('No media was loaded to get title information for! Call "loadMedia()" first!')
-        return self.titles
-
-    def load_media(self, file_path):
-        self.titles = TitleScan(self.handbrake_path, file_path).titles
-        self.is_media_set = True
-
-    def set_handbrake_args(self, args):
-        self.handbrake_args = args
-
-    @staticmethod
-    def intersperse(iterable, delimiter):
-        """Handy method to add a delimiter between every element of 'iterable'.
-
-        Found in this StackOverflow answer: http://stackoverflow.com/a/5656097/1741965
-        """
-        it = iter(iterable)
-        yield next(it)
-        for x in it:
-            yield delimiter
-            yield x
 
     @staticmethod
     def build_handbrake_cmd(program_settings, media, out_path, title_number):
@@ -212,28 +176,28 @@ class HandbrakeHandler:
         subtitle_tracks = [str(track.track_number) for track in selected_title.subtitle_tracks]
 
         # String-ify the audio track numbers with commas, E.G: '1,2,3,...,n' which is how Handbrake expects them:
-        audio_args = ['-a', ''.join(HandbrakeHandler.intersperse(audio_tracks, ','))]
+        audio_args = ['-a', ''.join(util.intersperse(audio_tracks, ','))]
         # For each audio track, there needs to be a corresponding encoder entry:
         # Should result in a string of the form: 'av_aac,av_aac,av_aac,av_aac,...' with the same length as audio_tracks.
-        audio_args += ['-E', ''.join(HandbrakeHandler.intersperse(['av_aac'] * len(audio_tracks), ','))]
+        audio_args += ['-E', ''.join(util.intersperse(['av_aac'] * len(audio_tracks), ','))]
         # Do the same for the mixdown option, keeping it at 5.1 surround sound (6 channel) at 384 KB/s:
-        audio_args += ['--mixdown', ''.join(HandbrakeHandler.intersperse(['6ch'] * len(audio_tracks), ','))]
-        audio_args += ['-B', ''.join(HandbrakeHandler.intersperse(['384'] * len(audio_tracks), ','))]
+        audio_args += ['--mixdown', ''.join(util.intersperse(['6ch'] * len(audio_tracks), ','))]
+        audio_args += ['-B', ''.join(util.intersperse(['384'] * len(audio_tracks), ','))]
         audio_args += ['--audio-fallback', 'ac3']
 
         # String-ify the subtitle track numbers, with an additional 'scan' track at the beginning:
         if subtitle_tracks:  # There might not be any subtitle tracks.
-            subtitle_args = ['--subtitle', ''.join(HandbrakeHandler.intersperse(['scan'] + subtitle_tracks, ','))]
+            subtitle_args = ['--subtitle', ''.join(util.intersperse(['scan'] + subtitle_tracks, ','))]
         else:
             subtitle_args = []
 
         cmd = [
             program_settings['handbrake']['handbrake_path'],
-            '-i', '"' + media.get_source_path() + '"',
+            '-i', '"' + media.source_path + '"',
             '-o', '"' + out_path + '"',
             '--title', str(title_number)
         ]
-        cmd += HandbrakeHandler.get_default_handbrake_args()
+        cmd += HandbrakeHandler.get_default_args()
         cmd += ['-f', program_settings['handbrake']['output_format']]
         cmd += ['-q', program_settings['handbrake']['quality']]
         cmd += ['-e', program_settings['handbrake']['encoder']]
@@ -241,5 +205,5 @@ class HandbrakeHandler:
         cmd += subtitle_args
         print('ENCODE ARGS:')
         print(repr(cmd))
-        cmd_string = ''.join(HandbrakeHandler.intersperse(cmd, ' '))
+        cmd_string = ''.join(util.intersperse(cmd, ' '))
         return cmd_string

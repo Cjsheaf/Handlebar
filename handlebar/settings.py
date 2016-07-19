@@ -1,41 +1,20 @@
 from configparser import ConfigParser
 import os
+import re
 
+# noinspection PyUnresolvedReferences
+from PyQt5.QtCore import (pyqtSignal)
 # noinspection PyUnresolvedReferences
 from PyQt5.QtWidgets import (QWidget, QDialog, QListWidget, QListWidgetItem, QStackedWidget, QHBoxLayout, QVBoxLayout,
                              QPushButton, QGroupBox, QLabel, QLineEdit, QFileDialog, QGridLayout, QSpinBox, QComboBox)
 
-
-class SettingsObject(ConfigParser):
-    """Stores up-to-date values for program-wide settings. Many classes and methods require an instance of this.
-
-    Values can be safely read from any thread, but writing values and calling the save() method are not currently
-    thread-safe operations. These operations should only be performed by the SettingsDialog class, anyway."""
-
-    def __init__(self, settings_filepath, defaults={}, create_if_missing=True):
-        super().__init__()
-        self.filepath = settings_filepath
-        self._load_settings_file(settings_filepath, create_if_missing, defaults)
-
-    def _load_settings_file(self, filepath, create_if_missing, defaults):
-        self.read_dict(defaults)
-
-        if create_if_missing and not os.path.isfile(filepath):
-            os.makedirs(os.path.split(filepath)[0], exist_ok=True)
-            with open(filepath, 'w') as file:
-                self.write(file)
-
-        self.read(filepath)
-
-    def save(self):
-        with open(self.filepath, 'w') as file:
-            self.write(file)
 
 def get_handlebar_defaults():
     return {
         'handlebar': {
             # The temporary ISO rips are stored here until being encoded.
             'temp_directory': os.path.abspath('./Temp'),
+            'database_path': os.path.abspath('./encode.db')
         },
         'handbrake': {
             'handbrake_path': 'not_set',  # TODO: Make this value spawn a UI prompt to set handbrake_path
@@ -44,9 +23,36 @@ def get_handlebar_defaults():
             'quality': '20'
         },
         'output': {
-            'media_directory': os.path.abspath('./Media')
+            'media_directory': os.path.abspath('./Media'),
+            'naming_scheme': '{name} ({year}).{format}'
         }
     }
+
+
+class SettingsObject(ConfigParser):
+    """Stores up-to-date values for program-wide settings. Many classes and methods require an instance of this.
+
+    Values can be safely read from any thread, but writing values or calling the save() method are not currently
+    thread-safe operations. These operations should only be performed by the SettingsDialog class, anyway."""
+
+    def __init__(self, settings_filepath, defaults=get_handlebar_defaults(), create_if_missing=True):
+        super().__init__()
+        self.filepath = settings_filepath
+        self._load_settings_file(settings_filepath, create_if_missing, defaults)
+
+    def _load_settings_file(self, filepath, create_if_missing, defaults):
+        self.read_dict(defaults)
+
+        if create_if_missing and not os.path.isfile(filepath):
+            os.makedirs(os.path.split(os.path.abspath(filepath))[0], exist_ok=True)
+            with open(filepath, 'w') as file:
+                self.write(file)
+
+        self.read(filepath)
+
+    def save(self):
+        with open(self.filepath, 'w') as file:
+            self.write(file)
 
 
 class SettingsDialog(QDialog):
@@ -270,8 +276,11 @@ class OutputSettingsPage(QWidget):
         media_group_layout.addWidget(media_path_browse_button)
         media_group.setLayout(media_group_layout)
 
+        schema_group = QGroupBox('Output File Naming Schema')
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(media_group)
+        main_layout.addWidget(schema_group)
         main_layout.addStretch(1)
         self.setLayout(main_layout)
 
@@ -284,3 +293,18 @@ class OutputSettingsPage(QWidget):
     def set_media_directory(self, filepath):
         # TODO: Sanity-check filepath and warn the user if it is not valid.
         self.parent.enqueue_change('output', 'media_directory', filepath)
+
+
+class StringSchemaWidget(QLineEdit):
+    keywords_changed = pyqtSignal(list)  # Triggers if a new keyword is found, or an existing keyword is removed.
+
+    def __init__(self):
+        super().__init__()
+        self.keywords = []
+        self.textChanged.connect(self._parse_schema)
+
+    def _parse_schema(self, text):
+        new_keywords = re.findall(r'{(\w+?)}', text)
+        if new_keywords != self.keywords:
+            self.keywords_changed.emit(new_keywords)
+            self.keywords = new_keywords
